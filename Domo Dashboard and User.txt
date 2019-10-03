@@ -1,0 +1,168 @@
+
+import pandas as pd
+from pydomo import Domo
+from pandas.io.json import json_normalize
+import numpy as np
+from pydomo.datasets import DataSetRequest, Schema, Column, ColumnType, Policy
+from pydomo.datasets import PolicyFilter, FilterOperator, PolicyType, Sorting
+
+# Script connection parametres
+CLIENT_ID = "<Enter cliend id>"
+CLIENT_SECRET = "<enter client secret>"
+API_HOST = 'api.domo.com'
+apiRoot = "https://api.domo.com"
+
+class DashboardMapping:
+    def __init__(self):
+        domo = self.init_domo_(CLIENT_ID,CLIENT_SECRET)
+        self.all_page_permissions(domo)
+        
+    def init_domo_(self,client_id,client_secret,**kwargs):
+        return Domo(client_id,client_secret,api_host = API_HOST,**kwargs)
+        
+     
+    def all_page_permissions(self,domo):
+        
+        #Helper function for retrieving all the user associated with the group.
+        #There is a cap of pulling 500 users at a time
+        def get_all_group_users(domo,Id,batch_size=100):
+            offset = 0
+            all_current_users = []
+            num_returned = batch_size
+            while num_returned == batch_size:
+                this_users = domo.groups.list_users(Id,batch_size,offset)
+                all_current_users.extend(this_users)
+                offset += batch_size
+                num_returned = len(this_users)
+            return(all_current_users)
+            
+        
+       #Helper functions for retrieving entire users in the domo instance.
+       #This is way around max cap of 500 users that can be pulled at once
+        def get_all_users(domo,batch_size=400):
+            offset = 0
+            all_current_users = []
+            num_returned = batch_size
+            while num_returned == batch_size:
+                this_users = domo.users.list(batch_size,offset)
+                all_current_users.extend(this_users)
+                offset += batch_size
+                num_returned = len(this_users)
+            return(all_current_users)
+         
+        #call function to get all the user in domo instance
+        all_users = get_all_users(domo)
+        
+        #helper function to get employee information
+        def getId(employee_id):
+            return list(filter(lambda x : x['id'] == employee_id, all_users))
+        
+        
+        #main logic that grabs all the users and their dashboard
+        page = domo.pages
+        page_list = list(page.list())
+        mapping = []
+        for pages in page_list:
+            get_page = page.get(pages['id'])
+            parent_user = get_page['visibility']['userIds']
+            p_groups = get_page['visibility']['groupIds']
+            if p_groups:
+                for groups in p_groups:
+                    parent_user.extend(get_all_group_users(domo,groups)) 
+            parent_user = list(set(parent_user))
+            for p_user in parent_user:
+                info = getId(p_user)[0]
+                p_map = {}
+                p_map['Page Name'] = pages['name']
+                p_map['Page ID'] = pages['id']
+                p_map['Page Type'] = 'Parent'
+                p_map['Parent Page'] = pages['name']
+                p_map['Parent ID'] = pages['id']
+                p_map['User'] = info['name']
+                try:
+                    p_map['Employee ID'] = info['employeeNumber']
+                except: 
+                    p_map['Employee ID']  = 'Missing'   
+                p_map['Email'] = info['email']
+                if not pages['children']:
+                    has_child = 'No'
+                else:
+                    has_child = 'Yes'
+                p_map['has_child'] = has_child
+                try:
+                    p_map['Location'] = info['location']
+                except:
+                    p_map['Location'] = 'Missing'
+                try:
+                    p_map['Title'] = info['title']
+                except:
+                    p_map['Title'] = 'Missing'
+                mapping.append(p_map)            
+            if pages['children']:
+                for subpage in pages['children']:
+                    get_subpage = page.get(subpage['id'])
+                    sub_user = get_subpage['visibility']['userIds']
+                    subgroups = get_subpage['visibility']['groupIds']
+                    if subgroups:
+                        for subgroup in subgroups:
+                            sub_user.extend(get_all_group_users(domo,subgroup))     
+                    sub_user = list(set(sub_user))
+                    for subusers in sub_user:
+                        sub_info = getId(subusers)[0]
+                        sp_map = {}
+                        sp_map['Page Name'] = subpage['name']
+                        sp_map['Page ID'] = subpage['id']
+                        sp_map['Page Type'] = 'Child'
+                        sp_map['Parent Page'] = pages['name']
+                        sp_map['Parent ID'] = pages['id']
+                        sp_map['User'] = sub_info['name']
+                        try:
+                            sp_map['Employee ID'] = info['employeeNumber']
+                        except: 
+                            sp_map['Employee ID']  = 'Missing'   
+                        sp_map['Email'] = info['email']
+                        sp_map['has_child'] = 'No'
+                        try:
+                            sp_map['Location'] = sub_info['location']
+                        except:
+                            sp_map['Location'] = 'Missing'
+                        try:
+                            sp_map['Title'] = sub_info['title']
+                        except:
+                            sp_map['Title'] = 'Missing'
+                        mapping.append(sp_map)
+        
+        #convert to dataframe and then to csv
+        data = pd.DataFrame.from_dict(mapping)
+        my_data = data.to_csv(index = False,header = False)
+        #print(my_data)
+        
+	#you first need to create the schema user this code below to screate the schema in domo
+        """
+        new_ds = DataSetRequest()
+        new_ds.name = 'Domo user and Dashboard Mapping Prod'
+        new_ds.description = 'Downloaded via API'
+        new_ds.schema = Schema([
+                                Column(ColumnType.STRING,'Email'),
+                                Column(ColumnType.STRING,'Employee ID'),
+                                Column(ColumnType.STRING, 'Location'),
+                                Column(ColumnType.DOUBLE, 'Page ID'),
+                                Column(ColumnType.STRING, 'Page Name'),
+                                Column(ColumnType.STRING, 'Page Type'),
+                                Column(ColumnType.DOUBLE, 'Parent ID'),  
+                                Column(ColumnType.STRING, 'Parent Page'),
+                                Column(ColumnType.STRING, 'Title'),                  
+                                Column(ColumnType.STRING, 'User'),
+                                Column(ColumnType.STRING, 'has_child')
+                                ])
+
+        dataset = domo.datasets.create(new_ds)
+        """
+        
+        #To upload back to domo use the dataset id of the dataset created and it will update the dataset
+        domo.datasets.data_import('<Enter dataset id>',my_data)
+        
+        
+DashboardMapping() 
+        
+
